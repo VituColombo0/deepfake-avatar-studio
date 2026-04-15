@@ -24,6 +24,22 @@ async def generate_avatar(request: GenerationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/avatars")
+async def list_avatars():
+    """Retorna a lista de avatares guardados."""
+    try:
+        if not os.path.exists(AVATAR_DIR):
+            return {"avatars": []}
+            
+        files = os.listdir(AVATAR_DIR)
+        valid_files = [f for f in files if f.endswith(('.png', '.jpg', '.jpeg'))]
+        # Ordem descrescente de modificação (mais novos primeiro)
+        valid_files.sort(key=lambda x: os.path.getmtime(os.path.join(AVATAR_DIR, x)), reverse=True)
+        
+        return {"success": True, "avatars": [f"/api/avatars/{f}" for f in valid_files]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/avatars/{filename}")
 async def get_avatar(filename: str):
     """Serve as imagens geradas localmente."""

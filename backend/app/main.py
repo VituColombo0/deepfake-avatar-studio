@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import faces, websockets
+from app.api.routes import faces, webrtc
 
 app = FastAPI(
     title="Deepfake Avatar API",
@@ -19,7 +19,7 @@ app.add_middleware(
 
 # Registrando Lógica de Negócios (Rotas)
 app.include_router(faces.router, prefix="/api")
-app.include_router(websockets.router)
+app.include_router(webrtc.router, prefix="/webrtc")
 
 @app.get("/")
 def read_root():

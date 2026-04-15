@@ -1,190 +1,167 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from 'react';
-import Link from 'next/link';
+import { useEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
 
 export default function StreamPage() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [processedFrame, setProcessedFrame] = useState<string | null>(null);
   const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
-  const requestRef = useRef<number>(0);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
-    // Carregar o avatar selecionado pelo builder
     const stored = localStorage.getItem("selectedAvatar");
     if (stored) setSelectedAvatarId(stored);
-  }, []);
-
-  const sendFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      if (isStreaming) requestRef.current = requestAnimationFrame(sendFrame);
-      return;
-    }
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-
-    if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      // Reduzir qualidade a 50% para FPS fluído no deepfake
-      const frameData = canvas.toDataURL('image/jpeg', 0.5);
-      
-      wsRef.current.send(JSON.stringify({ 
-        frame: frameData,
-        avatar_id: selectedAvatarId
-      }));
-    }
-
-    // Limitar para não afogar a engine. FPS Base de gravação
-    setTimeout(() => {
-      if (isStreaming) requestRef.current = requestAnimationFrame(sendFrame);
-    }, 1000 / 15); // ~15 FPS max para deepfakes mockados/pesados
-  }, [isStreaming, selectedAvatarId]);
-
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-        setIsStreaming(true);
-
-        // Inicia o server socket
-        wsRef.current = new WebSocket('ws://localhost:8000/ws/stream');
-        
-        wsRef.current.onmessage = (event) => {
-          // Frame modificado chega aqui
-          setProcessedFrame(event.data);
-        };
-        
-        wsRef.current.onopen = () => {
-          // Começa a enviar
-          requestRef.current = requestAnimationFrame(sendFrame);
-        };
-      }
-    } catch (err) {
-      console.error("Erro ao acessar webcam:", err);
-    }
-  };
-
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
-      tracks.forEach(track => track.stop());
-      setIsStreaming(false);
-      setProcessedFrame(null);
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
-      if (wsRef.current) wsRef.current.close();
-    }
-  };
-
-  // Limpeza
-  useEffect(() => {
+    
     return () => {
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
-      if (wsRef.current) wsRef.current.close();
+      stopStreaming();
     };
   }, []);
 
+  const negotiateWebRTC = async (pc: RTCPeerConnection) => {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    
+    const response = await fetch(`http://localhost:8000/webrtc/offer?avatar_id=${selectedAvatarId || ''}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            sdp: pc.localDescription?.sdp,
+            type: pc.localDescription?.type,
+        })
+    });
+    
+    const answer = await response.json();
+    await pc.setRemoteDescription(answer);
+  };
+
+  const startStreaming = async () => {
+    setIsStreaming(true);
+
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
+    pcRef.current = pc;
+
+    // Quando recebemos a track modificada do Python, tocamos no vídeo central
+    pc.addEventListener("track", (evt) => {
+        if (remoteVideoRef.current && evt.track.kind === "video") {
+            remoteVideoRef.current.srcObject = evt.streams[0];
+        }
+    });
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+        // Tocar video local com preview para referencia oculta, opcional
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+        
+        // Empurrar tracks locais para a conexão da IA
+        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+        // Negociar e Iniciar
+        await negotiateWebRTC(pc);
+
+    } catch (err) {
+        console.error("Erro na webcam:", err);
+        setIsStreaming(false);
+    }
+  };
+
+  const stopStreaming = () => {
+    if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
+    }
+    setIsStreaming(false);
+  };
+
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-8 bg-dark-900">
-      {/* Botao voltar */}
-      <div className="w-full max-w-5xl mb-4 flex justify-between">
-        <Link href="/studio" className="text-slate-400 hover:text-white transition flex items-center gap-2">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
-            Voltar ao Estúdio
-        </Link>
-        <h1 className="text-xl font-semibold bg-clip-text text-transparent bg-gradient-to-r from-primary-light to-white">Deepfake Stream</h1>
-      </div>
+    <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col p-6">
+      <header className="mb-8 p-4 bg-gray-900 border border-gray-800 rounded-xl flex items-center justify-between shadow-lg">
+        <div>
+          <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-indigo-500">
+            Real-Time Deepfake (WebRTC)
+          </h1>
+          <p className="text-gray-400 text-sm mt-1">Conexão Zero Latency H264 via RTCPeerConnection</p>
+        </div>
+        <div>
+          {!isStreaming ? (
+            <button
+              onClick={startStreaming}
+              className="px-6 py-2 rounded-lg font-semibold bg-indigo-600 hover:bg-indigo-500 transition-colors shadow-lg shadow-indigo-500/20"
+            >
+              Iniciar Câmera e IA
+            </button>
+          ) : (
+             <button
+              onClick={stopStreaming}
+              className="px-6 py-2 rounded-lg font-semibold bg-red-600 hover:bg-red-500 transition-colors shadow-lg shadow-red-500/20"
+            >
+              Parar Conexão
+            </button>
+          )}
+        </div>
+      </header>
 
-      <div className="w-full max-w-5xl flex flex-col lg:flex-row gap-8 relative z-10">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6">
         
-        {/* Stream View */}
-        <div className="flex-1">
-          <div className="aspect-video bg-dark-800 rounded-2xl border border-dark-700 overflow-hidden relative shadow-2xl flex items-center justify-center">
-            {/* Escondemos a real câmera, mostramos apenas a renderizada */}
-            <video ref={videoRef} playsInline muted className="hidden" />
-            <canvas ref={canvasRef} className="hidden" />
-
-            {isStreaming ? (
-              processedFrame ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={processedFrame} className="w-full h-full object-cover scale-x-[-1]" alt="Deepfake" />
-              ) : (
-                <div className="animate-pulse text-primary flex items-center gap-2">
-                  <span className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin"></span>
-                  Conectando Inteligência Artificial...
-                </div>
-              )
+        <div className="lg:col-span-1 bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl flex flex-col">
+          <h2 className="text-lg font-semibold mb-4 text-white">Avatar Carregado</h2>
+          <div className="flex-1 border-2 border-dashed border-gray-700 rounded-xl flex flex-col items-center justify-center p-4 bg-gray-800/50">
+            {selectedAvatarId ? (
+              <img src={`http://localhost:8000${selectedAvatarId}`} alt="Avatar" className="w-[180px] h-[180px] object-cover rounded-full shadow-lg border-4 border-indigo-500/50 mb-4" />
             ) : (
-              <div className="text-slate-500 text-center">
-                <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-                <p>Câmera desativada</p>
-              </div>
+                <div className="w-[180px] h-[180px] rounded-full bg-gray-800 flex items-center justify-center mb-4">
+                  <span className="text-gray-500">Nenhum</span>
+                </div>
             )}
-            
-            {/* Overlay indicators */}
-            {isStreaming && processedFrame && (
-              <div className="absolute top-4 right-4 flex items-center gap-2 px-3 py-1 bg-black/50 backdrop-blur-sm rounded-full text-xs font-medium text-green-400 border border-green-500/20">
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                Deepfake Ativo
-              </div>
-            )}
+            <p className="text-sm text-center text-gray-400">
+              {selectedAvatarId ? "A IA trocará seu rosto por esse avatar em tempo real." : "Volte ao estúdio para gerar um rosto."}
+            </p>
           </div>
         </div>
 
-        {/* Controls */}
-        <div className="w-full lg:w-80 space-y-6">
-          <div className="bg-dark-800 p-6 rounded-2xl border border-dark-700 shadow-xl">
-            <h3 className="text-lg font-semibold mb-4">Controle de Câmera</h3>
-            {isStreaming ? (
-              <button 
-                onClick={stopCamera}
-                className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/50 rounded-xl font-medium transition-colors"
-              >
-                Parar Câmera
-              </button>
-            ) : (
-              <button 
-                onClick={startCamera}
-                className="w-full py-3 bg-primary hover:bg-primary-light text-white rounded-xl font-medium transition-all shadow-lg shadow-primary/20"
-              >
-                Iniciar Câmera e Deepfake
-              </button>
-            )}
-          </div>
-
-          <div className="bg-dark-800 p-6 rounded-2xl border border-dark-700 shadow-xl">
-            <h3 className="text-lg font-semibold mb-4 text-slate-300">Avatar Selecionado</h3>
-            <div className="flex items-center gap-4 p-3 bg-dark-900 rounded-xl border border-dark-700 overflow-hidden">
-              {selectedAvatarId ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={selectedAvatarId} className="w-12 h-12 rounded-full object-cover border border-primary/50" alt="Selecionado" />
-              ) : (
-                <div className="w-12 h-12 rounded-full bg-dark-700 flex items-center justify-center">
-                    <span className="text-xs text-slate-500">N/A</span>
+        <div className="lg:col-span-3 bg-black rounded-2xl border border-gray-800 relative overflow-hidden flex items-center justify-center shadow-2xl">
+           
+          {isStreaming ? (
+             <>
+                <video 
+                   ref={remoteVideoRef} 
+                   autoPlay 
+                   playsInline 
+                   className="w-full h-full object-cover transform scale-x-[-1]" 
+                />
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                   <div className="w-[300px] h-[400px] border-2 border-indigo-500/50 rounded-[100px] flex flex-col justify-between p-4 shadow-[0_0_50px_rgba(99,102,241,0.2)]">
+                      <div className="text-center text-indigo-400 text-xs font-mono drop-shadow-md">ALINHE SEU ROSTO AQUI</div>
+                      <div className="flex justify-between">
+                         <div className="w-4 h-4 border-l-2 border-b-2 border-indigo-400"></div>
+                         <div className="w-4 h-4 border-r-2 border-b-2 border-indigo-400"></div>
+                      </div>
+                   </div>
                 </div>
-              )}
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">Avatar Customizado</p>
-                <p className="text-xs text-slate-500">Pronto para uso</p>
-              </div>
-            </div>
-            
-            <Link href="/studio" className="w-full mt-4 py-2 text-sm text-slate-400 hover:text-white transition-colors block text-center">
-              Trocar Avatar
-            </Link>
-          </div>
+             </>
+          ) : (
+             <div className="text-center">
+                <div className="w-20 h-20 bg-gray-800/80 rounded-full mx-auto flex items-center justify-center mb-4 border border-gray-700">
+                    <svg className="w-8 h-8 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                </div>
+                <p className="text-gray-500 font-medium">Câmera offline.</p>
+                <p className="text-gray-600 text-sm mt-1">Conecte-se via WebRTC para visualização latência-zero</p>
+             </div>
+          )}
+
+           {isStreaming && (
+              <motion.div initial={{ opacity: 0}} animate={{opacity: 1}} className="absolute top-4 left-4 bg-indigo-600/90 backdrop-blur text-white text-xs px-3 py-1.5 rounded-full flex items-center gap-2 border border-indigo-400/30">
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                  Conexão H264 Otimizada (AI Pipeline Ativo)
+              </motion.div>
+           )}
+
+           <video ref={localVideoRef} autoPlay playsInline muted className="hidden" />
         </div>
-        
+
       </div>
     </div>
   );
